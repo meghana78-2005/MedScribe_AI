@@ -48,6 +48,21 @@ JSON_STRATEGIES = {"Structured", "Safety-Constrained"}
 
 NOT_PROVIDED = "Not provided in the clinical dictation."
 
+# "Information detected" panel: which details were actually provided (key -> label shown in the app)
+DETECTED_LABELS = {
+    "age_and_sex": "Age / sex",
+    "symptoms": "Symptoms",
+    "duration": "Duration",
+    "severity": "Severity",
+    "vital_signs": "Vital signs",
+    "examination_findings": "Examination findings",
+    "medical_history": "Medical history",
+    "medications": "Medications",
+    "allergies": "Allergies",
+    "investigations": "Tests / imaging",
+}
+DETECTED_KEYS = list(DETECTED_LABELS)
+
 # ---------------------------------------------------------------------------
 # Building block 1: the role
 # ---------------------------------------------------------------------------
@@ -66,6 +81,18 @@ Use exactly these keys:
 
 {{
   "clinical_summary": "2-3 sentence summary of the dictation",
+  "information_detected": {{
+    "age_and_sex": "as stated, otherwise Not provided",
+    "symptoms": "as stated, otherwise Not provided",
+    "duration": "as stated, otherwise Not provided",
+    "severity": "as stated, otherwise Not provided",
+    "vital_signs": "as stated, otherwise Not provided",
+    "examination_findings": "as stated, otherwise Not provided",
+    "medical_history": "as stated, otherwise Not provided",
+    "medications": "as stated, otherwise Not provided",
+    "allergies": "as stated, otherwise Not provided",
+    "investigations": "tests or imaging as stated, otherwise Not provided"
+  }},
   "subjective": ["patient-reported symptoms and history, one item per string"],
   "objective": ["measured or examined findings, one item per string"],
   "assessment": "cautious interpretation of the information given",
@@ -86,13 +113,15 @@ Use exactly these keys:
 # ---------------------------------------------------------------------------
 SAFETY_RULES = f"""Follow these rules strictly:
 1. Use ONLY information that is stated in the clinical dictation.
-2. Never invent symptoms, medical history, medications, allergies, vital signs, examination findings, laboratory results or imaging findings. Do not add phrases such as "appears well" or "no acute distress" unless the dictation says so.
+2. Never invent age, sex, duration, severity, symptoms, medical history, medications, allergies, vital signs, examination findings, laboratory results or imaging findings. Do not add phrases such as "appears well" or "no acute distress" unless the dictation says so.
 3. If there is no objective information in the dictation, the "objective" list must contain exactly one item: "{NOT_PROVIDED}"
 4. Never present a possible diagnosis as confirmed. Use cautious wording such as "possible", "may suggest" or "consistent with".
-5. Give 3 to 5 possible differential diagnoses only when the dictation has enough information. If it does not, return an empty "differential_diagnosis" list and explain why in "assessment".
+5. Give 3 to 5 possible differential diagnoses only when the dictation has enough information. If it does not, return an empty "differential_diagnosis" list and explain why in "assessment". A dictation that gives only one or two bare symptoms, with no age, duration or examination findings, does not have enough information.
 6. In "plan", write general considerations for clinician review only. Do not name specific drugs or doses and do not tell anyone to start treatment.
 7. In "information_needing_clarification", list only missing details that are relevant to this case. Do not give a generic checklist.
-8. If you are unsure, say so instead of guessing."""
+8. If you are unsure, say so instead of guessing.
+9. The text may contain labelled fields such as "Age: 34" or "Symptoms reported: Fever, Cough". A field, symptom or detail that is not listed was NOT PROVIDED. Do not treat it as absent, normal or negative. Write "Not provided" for it in "information_detected".
+10. Text under "Additional information added later" is part of the clinical information. Combine it with the original text."""
 
 # ---------------------------------------------------------------------------
 # Building block 4: synthetic worked examples (used by Few-Shot and Safety)
@@ -112,6 +141,18 @@ EXAMPLES: list[dict] = [
                 "and mild lower abdominal discomfort. No fever or back pain. No "
                 "objective data recorded."
             ),
+            "information_detected": {
+                "age_and_sex": "26-year-old female",
+                "symptoms": "Burning and frequent urination, mild lower abdominal discomfort; no fever, no back pain",
+                "duration": "Two days",
+                "severity": "Not provided",
+                "vital_signs": "Not provided",
+                "examination_findings": "Not provided",
+                "medical_history": "Not provided",
+                "medications": "Not provided",
+                "allergies": "No known allergies",
+                "investigations": "Not provided (urine tests not recorded)",
+            },
             "subjective": [
                 "Burning during urination for two days",
                 "Frequent urination for two days",
@@ -167,6 +208,18 @@ EXAMPLES: list[dict] = [
                 "yesterday, painful on weight bearing, with mild swelling over "
                 "the outer ankle on examination."
             ),
+            "information_detected": {
+                "age_and_sex": "58-year-old male",
+                "symptoms": "Right ankle pain after a twisting injury, pain on weight bearing; no numbness",
+                "duration": "Since yesterday",
+                "severity": "Not provided",
+                "vital_signs": "Not provided",
+                "examination_findings": "Mild swelling over the outer ankle",
+                "medical_history": "Not provided",
+                "medications": "Not provided",
+                "allergies": "Not provided",
+                "investigations": "No imaging done",
+            },
             "subjective": [
                 "Right ankle pain since twisting it while walking yesterday",
                 "Pain on weight bearing",

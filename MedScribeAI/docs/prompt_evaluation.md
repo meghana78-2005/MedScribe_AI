@@ -23,13 +23,17 @@ Strategy E is the main strategy of the app.
 
 ## 2. Safety rules used in strategy E (`SAFETY_RULES`)
 1. Use only information stated in the dictation.
-2. Never invent symptoms, history, medications, allergies, vitals, exam findings, labs or imaging.
+2. Never invent age, sex, duration, severity, symptoms, history, medications, allergies, vitals, exam findings, labs or imaging.
 3. If there is no objective information, write exactly "Not provided in the clinical dictation."
 4. Never present a possible diagnosis as confirmed; use cautious wording.
-5. Give 3 to 5 differentials only when there is enough information; otherwise return an empty list and explain.
+5. Give 3 to 5 differentials only when there is enough information; otherwise return an empty list and explain. One or two bare symptoms with no age, duration or findings is not enough.
 6. Plan items are considerations for clinician review; no drug names, doses or treatment orders.
 7. List only missing information relevant to this case, not a generic checklist.
 8. If unsure, say so instead of guessing.
+9. Labelled fields such as "Age: 34" were provided; any field or symptom that is not listed was **not provided** (never treated as absent or negative).
+10. Text under "Additional information added later" is part of the clinical information and is combined with the original.
+
+The reply also contains an `information_detected` section (age and sex, symptoms, duration, severity, vital signs, examination findings, medical history, medications, allergies, tests or imaging), where every item the user did not give must read "Not provided".
 
 Other design choices:
 - The dictation is wrapped in `<dictation>` tags and the prompt says to treat it only as data.

@@ -8,7 +8,7 @@ import json
 
 import streamlit as st
 
-from prompts.prompts import NOT_PROVIDED
+from prompts.prompts import DETECTED_KEYS, NOT_PROVIDED
 
 REQUIRED_KEYS = [
     "clinical_summary", "subjective", "objective", "assessment", "plan",
@@ -28,6 +28,14 @@ def _as_list(value) -> list[str]:
     if isinstance(value, str):
         return [value] if value.strip() else []
     return [str(item) for item in value]
+
+
+def _as_text(value) -> str:
+    """One display string for a detected-information value; empty means Not provided."""
+    if isinstance(value, (list, tuple)):
+        value = ", ".join(str(item) for item in value)
+    value = str(value).strip() if value is not None else ""
+    return value or "Not provided"
 
 
 def parse_json_response(text: str) -> dict:
@@ -58,6 +66,11 @@ def parse_json_response(text: str) -> dict:
     missing = [key for key in REQUIRED_KEYS if key not in data]
     if missing:
         raise ParseError("The reply is missing fields: " + ", ".join(missing))
+
+    # "Information detected": anything the model left out is treated as Not provided.
+    detected = data.get("information_detected")
+    detected = detected if isinstance(detected, dict) else {}
+    data["information_detected"] = {key: _as_text(detected.get(key)) for key in DETECTED_KEYS}
 
     # Normalise the fields so the display code can rely on their types.
     for key in ("subjective", "objective", "plan", "information_needing_clarification"):

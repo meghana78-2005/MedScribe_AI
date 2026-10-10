@@ -14,13 +14,16 @@ from prompts import prompts
 from sample_data.sample_cases import SAMPLE_CASES
 from utils import llm_client
 from utils.formatting import ParseError, parse_json_response
+from utils import case as case_mod
 from utils import reports as reports_mod
+from utils.export import ExportError, report_to_pdf
+from utils import ui as ui_mod
 from utils.ui import esc
-from utils.validation import find_possible_pii, validate_dictation
+from utils.validation import find_possible_pii, validate_additions, validate_dictation
 
 CASE = SAMPLE_CASES["Headache"]
 VALID_NOTE = {
-    "clinical_summary": "s", "subjective": ["a"], "objective": [], "assessment": "a",
+    "clinical_summary": "s", "information_detected": {}, "subjective": ["a"], "objective": [], "assessment": "a",
     "plan": ["p"], "differential_diagnosis": [], "information_needing_clarification": [],
     "safety_note": "n",
 }
@@ -32,7 +35,11 @@ class ValidationTests(unittest.TestCase):
         self.assertFalse(validate_dictation("     ")[0])
 
     def test_very_short_rejected(self):
-        self.assertFalse(validate_dictation("cough and fever")[0])
+        self.assertFalse(validate_dictation("fever")[0])
+        self.assertFalse(validate_dictation("cough fever")[0])
+
+    def test_short_symptom_list_reaches_the_model(self):
+        self.assertTrue(validate_dictation("cough and fever")[0])
 
     def test_too_long_rejected(self):
         self.assertFalse(validate_dictation("word " * 2000)[0])
@@ -147,7 +154,9 @@ class LlmClientTests(unittest.TestCase):
 
 
 NOTE = {
-    "clinical_summary": "28-year-old with headache for two days and nausea.", "subjective": ["Headache"],
+    "clinical_summary": "28-year-old with headache for two days and nausea.",
+    "information_detected": {"age_and_sex": "28-year-old female", "symptoms": "Headache, nausea", "duration": "Two days"},
+    "subjective": ["Headache"],
     "objective": ["Not provided in the clinical dictation."], "assessment": "May suggest a primary headache.",
     "plan": ["Clinician review"],
     "differential_diagnosis": [{"condition": "Migraine", "supporting_information": "Throbbing", "missing_helpful_information": "Aura"}],
@@ -190,6 +199,269 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn("<script>", esc("<script>alert(1)</script>"))
         self.assertEqual(esc("SpO$_2$ 97"), "SpO&#36;_2&#36; 97")
         self.assertNotIn("\n", esc("line one\n\nline two"))
+
+
+class StaleReportTests(unittest.TestCase):
+    def setUp(self):
+        self.abdominal = "severe lower abdominal pain for 15 hours"
+        self.current = {"input_hash": reports_mod.input_fingerprint(self.abdominal), "note": NOTE}
+
+    def test_no_note_yet(self):
+        self.assertEqual(reports_mod.report_status(None, reports_mod.input_fingerprint("cough and fever")), "none")
+
+    def test_note_is_fresh_for_the_same_text(self):
+        fp = reports_mod.input_fingerprint(self.abdominal)
+        self.assertEqual(reports_mod.report_status(self.current, fp), "fresh")
+
+    def test_changed_text_makes_the_note_stale(self):
+        fp = reports_mod.input_fingerprint("cough and fever")
+        self.assertEqual(reports_mod.report_status(self.current, fp), "stale")
+
+    def test_extra_spaces_do_not_make_it_stale_but_real_edits_do(self):
+        spaced = reports_mod.input_fingerprint("  severe lower   abdominal pain\nfor 15 hours ")
+        self.assertEqual(reports_mod.report_status(self.current, spaced), "fresh")
+        edited = reports_mod.input_fingerprint(self.abdominal + " and vomiting")
+        self.assertEqual(reports_mod.report_status(self.current, edited), "stale")
+
+    def test_going_back_to_the_original_text_shows_the_note_again(self):
+        stale = reports_mod.report_status(self.current, reports_mod.input_fingerprint("cough and fever"))
+        back = reports_mod.report_status(self.current, reports_mod.input_fingerprint(self.abdominal))
+        self.assertEqual((stale, back), ("stale", "fresh"))
+
+    def test_button_labels(self):
+        label = reports_mod.generate_button_label
+        self.assertEqual(label("none", False), "\u2728 Analyze Clinical Note")
+        self.assertEqual(label("fresh", False), "\U0001F504 Re-analyze Clinical Note")
+        self.assertEqual(label("stale", False), "\u2728 Analyze Updated Information")
+        self.assertEqual(label("stale", True), "Analyzing...")
+
+    def test_sparse_input_rules_are_in_the_prompt(self):
+        prompt = prompts.build_prompt("Safety-Constrained", "cough and fever")
+        self.assertIn("Never invent age, sex, duration, severity", prompt)
+        self.assertIn("one or two bare symptoms", prompt)
+
+
+SAMPLE_CASE_FIELDS = {
+    "age": "34", "sex": "Male", "chief_complaint": "", "duration": "", "symptoms": ["Fever", "Cough"],
+    "other_symptoms": "fever, sore throat", "history": "", "medications": "", "allergies": "",
+    "exam": "", "vitals": "", "other": "", "dictation": "",
+}
+
+
+class CaseTests(unittest.TestCase):
+    def test_plain_dictation_is_sent_exactly_as_typed(self):
+        self.assertEqual(case_mod.case_text({"dictation": "  cough and fever "}), "cough and fever")
+
+    def test_empty_fields_are_left_out_never_written_as_no(self):
+        text = case_mod.case_text(SAMPLE_CASE_FIELDS)
+        self.assertIn("Age: 34", text)
+        self.assertIn("Symptoms reported: Fever, Cough, sore throat", text)
+        for label in ("Allergies", "Vital signs", "Examination findings", "Current medications", "Duration"):
+            self.assertNotIn(label, text)
+        self.assertNotIn(": No", text)
+
+    def test_unticked_symptoms_are_not_listed_and_duplicates_are_removed(self):
+        symptoms = case_mod.symptom_list(SAMPLE_CASE_FIELDS)
+        self.assertEqual(symptoms, ["Fever", "Cough", "sore throat"])
+
+    def test_dictation_is_added_under_its_own_heading(self):
+        text = case_mod.case_text({"age": "34", "dictation": "cough for three days"})
+        self.assertTrue(text.endswith("Clinical dictation:\ncough for three days"))
+
+    def test_content_has_no_labels_and_empty_case_is_empty(self):
+        self.assertEqual(case_mod.case_content(SAMPLE_CASE_FIELDS), "34 Male Fever, Cough, sore throat")
+        self.assertEqual(case_mod.case_content({}), "")
+        self.assertEqual(case_mod.provided_summary({}), "nothing yet")
+
+    def test_additions_are_combined_with_the_original(self):
+        text = case_mod.with_additions("cough and fever", ["3 days", "no chest pain"])
+        self.assertIn("cough and fever", text)
+        self.assertIn("Additional information added later by the user:\n- 3 days\n- no chest pain", text)
+        self.assertEqual(case_mod.with_additions("cough", []), "cough")
+
+    def test_edits_are_kept_separate_from_the_ai_note(self):
+        version = {"note": NOTE, "edited": None}
+        self.assertEqual(case_mod.effective_note(version)["assessment"], NOTE["assessment"])
+        version["edited"] = {"subjective": ["Edited item"], "assessment": "Edited assessment"}
+        shown = case_mod.effective_note(version)
+        self.assertEqual((shown["subjective"], shown["assessment"]), (["Edited item"], "Edited assessment"))
+        self.assertEqual(shown["plan"], NOTE["plan"])
+        self.assertEqual(NOTE["subjective"], ["Headache"])          # the AI version itself is unchanged
+
+    def test_line_conversion(self):
+        self.assertEqual(case_mod.lines_to_list("- one\n\n\u2022 two\n  three  "), ["one", "two", "three"])
+        self.assertEqual(case_mod.list_to_lines(["a", "b"]), "a\nb")
+
+    def test_compare_finds_added_and_updated_information(self):
+        old = {"information_detected": {"symptoms": "Cough, fever", "duration": "Not provided", "vital_signs": "Temp 38 C"},
+               "differential_diagnosis": [{"condition": "Viral infection"}]}
+        new = {"information_detected": {"symptoms": "Dry cough, fever", "duration": "3 days", "vital_signs": "temp 38 c"},
+               "differential_diagnosis": [{"condition": "Viral infection"}, {"condition": "Bronchitis"}]}
+        changes = {c["label"]: c for c in case_mod.compare_information(old, new)}
+        self.assertEqual(changes["Duration"]["kind"], "Added")
+        self.assertEqual(changes["Symptoms"]["kind"], "Updated")
+        self.assertNotIn("Vital signs", changes)               # same text apart from letter case
+        self.assertEqual(case_mod.differential_changes(old, new), (["Bronchitis"], []))
+
+    def test_is_provided(self):
+        self.assertFalse(case_mod.is_provided("Not provided"))
+        self.assertFalse(case_mod.is_provided("not provided (urine tests not recorded)"))
+        self.assertFalse(case_mod.is_provided(""))
+        self.assertTrue(case_mod.is_provided("3 days"))
+
+
+class InformationDetectedTests(unittest.TestCase):
+    def test_missing_or_odd_values_become_not_provided(self):
+        note = dict(VALID_NOTE, information_detected={"symptoms": ["cough", "fever"], "duration": "", "severity": None})
+        parsed = parse_json_response(json.dumps(note))["information_detected"]
+        self.assertEqual(parsed["symptoms"], "cough, fever")
+        self.assertEqual(parsed["duration"], "Not provided")
+        self.assertEqual(parsed["vital_signs"], "Not provided")      # key missing completely
+        self.assertEqual(set(parsed), set(prompts.DETECTED_KEYS))
+
+    def test_notes_without_the_key_still_parse(self):
+        note = {k: v for k, v in VALID_NOTE.items() if k != "information_detected"}
+        self.assertEqual(parse_json_response(json.dumps(note))["information_detected"]["allergies"], "Not provided")
+
+    def test_prompt_asks_for_information_detected_and_treats_unlisted_as_not_provided(self):
+        prompt = prompts.build_prompt("Safety-Constrained", "Age: 34\nSymptoms reported: Fever")
+        self.assertIn('"information_detected"', prompt)
+        self.assertIn("was NOT PROVIDED", prompt)
+        self.assertIn("Additional information added later", prompt)
+
+
+class AdditionsValidationTests(unittest.TestCase):
+    def test_short_additions_are_fine(self):
+        self.assertTrue(validate_additions("3 days")[0])
+
+    def test_empty_long_and_identifying_additions_are_rejected(self):
+        self.assertFalse(validate_additions("   ")[0])
+        self.assertFalse(validate_additions("x" * 2001)[0])
+        self.assertFalse(validate_additions("call 9876543210")[0])
+
+
+class ExportTests(unittest.TestCase):
+    def report(self, **changes):
+        note = dict(NOTE, **changes)
+        return reports_mod.make_report("R-001", "Test", "now", "original input", note, update_count=1, additions=["3 days"])
+
+    def test_pdf_is_created(self):
+        self.assertEqual(report_to_pdf(self.report())[:4], b"%PDF")
+
+    def test_pdf_handles_unusual_characters_markup_and_empty_sections(self):
+        odd = self.report(clinical_summary="Temp 38\u00b0C \u2013 <b>bold</b> & \u201cquote\u201d \u2265 5 \u4e2d", differential_diagnosis=[],
+                          objective=[], information_needing_clarification=[])
+        self.assertEqual(report_to_pdf(odd)[:4], b"%PDF")
+
+    def test_broken_report_gives_a_friendly_error(self):
+        with self.assertRaises(ExportError):
+            report_to_pdf({"id": "x"})
+
+    def test_text_export_has_information_detected_and_additions(self):
+        text = reports_mod.note_to_text(self.report())
+        self.assertIn("INFORMATION DETECTED", text)
+        self.assertIn("- Duration: Two days", text)
+        self.assertIn("ADDITIONAL INFORMATION ADDED LATER\n- 3 days", text)
+        self.assertIn("Updates: 1", text)
+
+    def test_saved_report_rows_include_update_count(self):
+        self.assertEqual(reports_mod.report_rows([self.report()])[0]["Updates"], 1)
+
+
+class TranscriptionTests(unittest.TestCase):
+    def test_audio_is_sent_with_an_instruction_and_the_transcript_is_returned(self):
+        client = mock.MagicMock()
+        client.models.generate_content.return_value = SimpleNamespace(text="  cough and fever  ")
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "fake"}):
+            with mock.patch("utils.llm_client.genai.Client", return_value=client):
+                with mock.patch.object(llm_client.types, "Part", create=True) as part:
+                    text = llm_client.transcribe_audio(b"RIFFdata", "audio/wav")
+        self.assertEqual(text, "cough and fever")
+        part.from_bytes.assert_called_once_with(data=b"RIFFdata", mime_type="audio/wav")
+        sent = client.models.generate_content.call_args.kwargs["contents"]
+        self.assertEqual(sent[0], llm_client.TRANSCRIBE_INSTRUCTION)
+
+    def test_transcription_needs_an_api_key(self):
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
+            with mock.patch.object(llm_client.types, "Part", create=True):
+                with self.assertRaises(llm_client.LLMError):
+                    llm_client.transcribe_audio(b"x")
+
+
+def _luminance(hex_colour: str) -> float:
+    channels = [int(hex_colour.lstrip("#")[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+    linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def contrast(first: str, second: str) -> float:
+    lighter, darker = sorted([_luminance(first), _luminance(second)], reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+class DesignTests(unittest.TestCase):
+    def test_text_colours_meet_wcag_aa(self):
+        p = ui_mod.PALETTE
+        pairs = [("navy", "bg"), ("navy", "card"), ("muted", "bg"), ("muted", "card"), ("card", "teal"), ("teal", "card"),
+                 ("teal-dark", "teal-soft"), ("amber-text", "amber-bg"), ("green-text", "green-bg"), ("red-text", "red-bg"),
+                 ("side-text", "side-bg"), ("side-muted", "side-bg"), ("side-focus", "side-bg"), ("card", "navy"), ("teal-dark", "bg"), ("muted", "tint"), ("navy", "tint"), ("teal-dark", "card")]
+        for foreground, background in pairs:
+            self.assertGreaterEqual(contrast(p[foreground], p[background]), 4.5, f"{foreground} on {background}")
+
+    def test_theme_file_matches_the_palette(self):
+        try:
+            import tomllib
+        except ImportError:                      # Python 3.10
+            self.skipTest("tomllib needs Python 3.11 or newer")
+        with open(".streamlit/config.toml", "rb") as handle:
+            theme = tomllib.load(handle)["theme"]
+        p = ui_mod.PALETTE
+        self.assertEqual(theme["primaryColor"].lower(), p["teal"].lower())
+        self.assertEqual(theme["backgroundColor"].lower(), p["bg"].lower())
+        self.assertEqual(theme["textColor"].lower(), p["navy"].lower())
+        self.assertEqual(theme["sidebar"]["backgroundColor"].lower(), p["side-bg"].lower())
+
+    def test_css_uses_the_requested_palette(self):
+        for colour in ("#F1F6FB", "#243B53", "#167D8D"):
+            self.assertIn(colour.lower(), ui_mod.CSS.lower())
+
+    def test_table_card_escapes_values_and_shows_status_badges(self):
+        html_text = ui_mod.table_card([{"Title": "<script>x</script>", "Status": "Saved"}, {"Title": "b", "Status": "Not saved"}])
+        self.assertNotIn("<script>", html_text)
+        self.assertIn("badge-ok", html_text)
+        self.assertIn("badge-neutral", html_text)
+        self.assertIn("Nothing here yet", ui_mod.table_card([], empty="Empty list"))
+
+    def test_navy_sidebar_and_teal_primary_are_in_the_stylesheet(self):
+        css = ui_mod.CSS
+        self.assertIn("--side-bg: #243B53", css)
+        self.assertIn('[data-testid="stSidebar"]', css)
+        self.assertIn("button[kind^=\"primary\"]", css)
+        self.assertIn("stBaseButton-primary", css)
+
+    def test_recent_notes_and_empty_states(self):
+        rows = [{"title": "<b>Cough</b>", "created": "02 Oct 2026, 10:00", "updates": 1, "saved": True},
+                {"title": "Headache", "created": "02 Oct 2026, 11:00", "updates": 0, "saved": False}]
+        html_text = ui_mod.note_list(rows, empty="none")
+        self.assertNotIn("<b>Cough", html_text)
+        self.assertIn("1 update<", html_text.replace("</div>", "<"))
+        self.assertIn("0 updates", html_text)
+        self.assertIn("badge-ok", html_text)
+        self.assertIn("badge-neutral", html_text)
+        self.assertIn("No clinical notes yet", ui_mod.note_list([], empty="Start here"))
+        self.assertIn("Start here", ui_mod.empty_state("📋", "No reports yet", "Start here"))
+
+    def test_how_it_works_and_hero(self):
+        steps = ui_mod.how_it_works(["one", "two <i>"])
+        self.assertEqual(steps.count("step-num"), 2)
+        self.assertNotIn("<i>", steps)
+        self.assertEqual(ui_mod.hero("T", "text", "eyebrow", ["a", "b"]).count("class='pill'"), 2)
+
+    def test_card_variants_and_stat_icons(self):
+        self.assertIn("card-warn", ui_mod.card("t", "<p>x</p>", variant="warn"))
+        self.assertNotIn("card-warn", ui_mod.card("t", "<p>x</p>"))
+        self.assertIn("stat-icon", ui_mod.stat_card("Notes", 3, "hint", "📝"))
+        self.assertIn("status-bad", ui_mod.status_pill("missing", ok=False))
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 import re
 
-MIN_WORDS = 8          # shorter than this is too little to build a useful note
+MIN_WORDS = 3          # fewer words than this (for example one symptom) is not enough to work with
 MAX_CHARACTERS = 5000  # keeps requests small and fast
 
 # Simple patterns that suggest personal identifiers. This is a basic safety
@@ -54,4 +54,23 @@ def validate_dictation(text: str) -> tuple[bool, str]:
             "Please remove them and use synthetic or de-identified text."
         )
 
+    return True, ""
+
+
+MAX_ADDITION_CHARACTERS = 2000
+
+
+def validate_additions(text: str) -> tuple[bool, str]:
+    """Check information the user adds later (it can be short, for example "3 days")."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False, "Please enter the additional information first."
+    if len(cleaned) > MAX_ADDITION_CHARACTERS:
+        return False, f"The additional information is too long. Please keep it under {MAX_ADDITION_CHARACTERS} characters."
+    pii_found = find_possible_pii(cleaned)
+    if pii_found:
+        return False, (
+            "The text may contain personal identifiers (" + ", ".join(pii_found) + "). "
+            "Please remove them and use synthetic or de-identified text."
+        )
     return True, ""

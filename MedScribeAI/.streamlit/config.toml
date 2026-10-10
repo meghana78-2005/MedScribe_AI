@@ -1,7 +1,15 @@
+# Colour theme. Needs Streamlit 1.46 or newer for the dark [theme.sidebar] section.
+# (The app also repeats the main colours in its own stylesheet, so it still looks right if this file is not picked up.)
 [theme]
 base = "light"
-primaryColor = "#0F8B8D"
-backgroundColor = "#F4F8FA"
+primaryColor = "#167D8D"
+backgroundColor = "#F1F6FB"
 secondaryBackgroundColor = "#FFFFFF"
-textColor = "#12355B"
+textColor = "#243B53"
 font = "sans serif"
+
+[theme.sidebar]
+backgroundColor = "#243B53"
+secondaryBackgroundColor = "#2F4A66"
+textColor = "#FFFFFF"
+primaryColor = "#167D8D"

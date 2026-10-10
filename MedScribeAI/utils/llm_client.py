@@ -31,13 +31,8 @@ def get_model_name() -> str:
     return os.getenv("GEMINI_MODEL", "").strip() or DEFAULT_MODEL
 
 
-def generate_text(prompt: str, json_output: bool = False) -> str:
-    """Send a prompt to Gemini and return the reply text.
-
-    Args:
-        prompt: the full prompt text.
-        json_output: ask Gemini to reply with JSON only (used from Stage 5).
-    """
+def _generate(contents, json_output: bool = False) -> str:
+    """Send contents (text, or text plus audio) to Gemini and return the reply text."""
     if not is_api_key_configured():
         raise LLMError(
             "No API key found. Create a .env file (copy .env.example) and set "
@@ -53,7 +48,7 @@ def generate_text(prompt: str, json_output: bool = False) -> str:
     try:
         client = genai.Client(api_key=os.getenv("GEMINI_API_KEY").strip())
         response = client.models.generate_content(
-            model=get_model_name(), contents=prompt, config=config
+            model=get_model_name(), contents=contents, config=config
         )
     except errors.APIError as err:
         raise LLMError(_explain_api_error(err)) from err
@@ -72,6 +67,29 @@ def generate_text(prompt: str, json_output: bool = False) -> str:
             "Try rephrasing the input or try again."
         )
     return reply
+
+
+def generate_text(prompt: str, json_output: bool = False) -> str:
+    """Send a prompt to Gemini and return the reply text.
+
+    Args:
+        prompt: the full prompt text.
+        json_output: ask Gemini to reply with JSON only.
+    """
+    return _generate(prompt, json_output)
+
+
+TRANSCRIBE_INSTRUCTION = (
+    "Transcribe the speech in this audio exactly as spoken. Do not add, correct, "
+    "summarise or interpret anything. Return only the transcript. If there is no "
+    "clear speech, return an empty reply."
+)
+
+
+def transcribe_audio(audio_bytes: bytes, mime_type: str = "audio/wav") -> str:
+    """Convert a short recording to text with Gemini (not real-time, not medically validated)."""
+    audio_part = types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
+    return _generate([TRANSCRIBE_INSTRUCTION, audio_part])
 
 
 def _explain_api_error(err: errors.APIError) -> str:
